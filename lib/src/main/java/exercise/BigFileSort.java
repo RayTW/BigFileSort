@@ -11,7 +11,6 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Iterator;
 import java.util.List;
 import java.util.Random;
 import java.util.Scanner;
@@ -27,36 +26,28 @@ public class BigFileSort {
   }
 
   /**
-   * 建立n筆亂數數值.
+   * 建立指定筆亂數數值.
    *
    * @param path 存檔路徑
    * @param numberCount 總筆數
    */
   public void createRandomNumerFile(Path path, int numberCount) {
-    try {
-      Files.write(
-          path,
-          new Iterable<String>() {
+    if (Files.notExists(path.getParent())) {
+      try {
+        Files.createDirectory(path.getParent());
+      } catch (IOException e) {
+        e.printStackTrace();
+      }
+    }
 
-            @Override
-            public Iterator<String> iterator() {
-              return new Iterator<String>() {
-                int count = 0;
-                Random random = new Random();
+    Random random = new Random();
 
-                @Override
-                public boolean hasNext() {
-                  return count < numberCount;
-                }
+    try (PrintWriter writer =
+        new PrintWriter(Files.newBufferedWriter(path, Charset.forName("utf-8")))) {
 
-                @Override
-                public String next() {
-                  count++;
-                  return String.valueOf(random.nextInt(Integer.MAX_VALUE));
-                }
-              };
-            }
-          });
+      for (int i = 0; i < numberCount; i++) {
+        writer.println(String.valueOf(random.nextInt(Integer.MAX_VALUE)));
+      }
     } catch (IOException e) {
       e.printStackTrace();
     }
@@ -68,13 +59,20 @@ public class BigFileSort {
    * @param source 未排序檔案路徑
    * @param target 排序過檔案路徑
    */
-  public void sort(Path source, Path target, int total, int filePieceCount) {
+  public void executeSort(Path source, Path target, int total, int filePieceCount) {
     String tempPath = source.getParent().toString() + "/piece/piece%d.txt";
 
     reduce(source, tempPath, total / filePieceCount);
-    writeSortedFile(tempPath, filePieceCount, target);
+    writeFile(tempPath, filePieceCount, target);
   }
 
+  /**
+   * 將大檔拆分為多個檔案(數值降冪排序).
+   *
+   * @param source 來源檔
+   * @param tempPath 拆分後的路徑暫存檔
+   * @param batch 每個拆分檔案筆數(必須可整除總筆數)
+   */
   private void reduce(Path source, String tempPath, int batch) {
     try {
       Path temp = Paths.get(tempPath);
@@ -96,7 +94,8 @@ public class BigFileSort {
           }
           Arrays.sort(numbers);
 
-          try (PrintWriter writer = new PrintWriter(piecePath.toString(), "utf-8")) {
+          try (PrintWriter writer =
+              new PrintWriter(Files.newBufferedWriter(piecePath, Charset.forName("utf-8")))) {
             for (int n : numbers) {
               writer.println(String.valueOf(n));
             }
@@ -119,12 +118,14 @@ public class BigFileSort {
    * @param filePieceCount 分部檔案數
    * @param target 已排序的檔案
    */
-  public void writeSortedFile(String tempPath, int filePieceCount, Path target) {
-    ArrayList<PushbackReader> readers = new ArrayList<>();
+  public void writeFile(String tempPath, int filePieceCount, Path target) {
+    ArrayList<PushbackReaderBuffer> readers = new ArrayList<>();
 
     for (int i = 0; i < filePieceCount; i++) {
       try {
-        readers.add(new PushbackReader(new FileReader(String.format(tempPath, i)), 11));
+        readers.add(
+            new PushbackReaderBuffer(
+                new PushbackReader(new FileReader(String.format(tempPath, i)), 11)));
       } catch (FileNotFoundException e) {
         e.printStackTrace();
       }
@@ -137,44 +138,55 @@ public class BigFileSort {
       while (!(min = findMin(readers)).isEmpty()) {
         writer.println(min);
       }
+
+      // 刪除分割暫存檔
+      Path tempFolder = Paths.get(tempPath).getParent();
+      Files.list(tempFolder)
+          .forEach(
+              path -> {
+                try {
+                  Files.delete(path);
+                } catch (IOException e) {
+                  e.printStackTrace();
+                }
+              });
+      Files.delete(tempFolder);
     } catch (IOException e) {
       e.printStackTrace();
     }
   }
 
-  private String findMin(List<PushbackReader> readers) {
-    int min = Integer.MAX_VALUE;
-    StringBuilder buf = new StringBuilder();
-    char[] c = new char[1];
+  /**
+   * 掃全部檔案找出每個檔案第1個數值並比對其中最小值回傳.
+   *
+   * @param readers 多個排序過檔案
+   */
+  private String findMin(List<PushbackReaderBuffer> readers) {
+    Integer min = null;
+    PushbackReaderBuffer minReader = null;
 
     for (int i = readers.size() - 1; i >= 0; i--) {
-      PushbackReader reader = readers.get(i);
+      PushbackReaderBuffer reader = readers.get(i);
 
       try {
-        while ((reader.read(c)) != -1) {
-          if (c[0] == '\n') {
-            break;
-          }
-          buf.append(c[0]);
-        }
-        if (buf.length() == 0) {
+        if (reader.readline().isEmpty()) {
           readers.remove(i).close();
           continue;
         }
 
-        int n = Integer.parseInt(buf.toString());
-
-        if (n < min) {
-          min = n;
+        if (min == null || reader.hasPervious() && reader.perviousInt() < min) {
+          if (minReader != null) {
+            minReader.unread();
+          }
+          min = reader.perviousInt();
+          minReader = reader;
         } else {
-          reader.unread(buf.append('\n').toString().toCharArray());
+          reader.unread();
         }
-        buf.setLength(0);
       } catch (IOException e) {
         e.printStackTrace();
       }
     }
-
     return readers.isEmpty() ? "" : String.valueOf(min);
   }
 
@@ -185,11 +197,16 @@ public class BigFileSort {
    */
   public static void main(String[] args) {
     BigFileSort big = new BigFileSort();
+    String root = "/Users/ray/Desktop/bigFile/";
+    Path source = Paths.get(root, "numbers.txt");
+    Path target = Paths.get(root, "result.txt");
+    int totalCount = 1000000; // 總筆數
 
-    Path source = Paths.get("/Users/ray/Desktop/test/numbers1.txt");
-    Path target = Paths.get("/Users/ray/Desktop/test/numbersSorted.txt");
+    // 亂數產生數值
+    big.createRandomNumerFile(source, totalCount);
 
-    //    big.createRandomNumerFile(source, 10000);
-    big.sort(source, target, 10000, 200);
+    long time = System.currentTimeMillis();
+    big.executeSort(source, target, totalCount, 200);
+    System.out.println("time=" + (System.currentTimeMillis() - time) + "ms");
   }
 }
