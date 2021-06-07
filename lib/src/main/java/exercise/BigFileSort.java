@@ -21,9 +21,6 @@ import java.util.Scanner;
  * @author ray
  */
 public class BigFileSort {
-  public boolean someLibraryMethod() {
-    return true;
-  }
 
   /**
    * 建立指定筆亂數數值.
